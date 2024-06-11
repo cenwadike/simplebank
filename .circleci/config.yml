@@ -1,0 +1,74 @@
+version: 2.1
+jobs:
+  build:
+    docker:
+      # CircleCI Go images available at: https://circleci.com/developer/images/image/cimg/go
+      - image: cimg/go:1.12
+      # CircleCI PostgreSQL images available at: https://circleci.com/developer/images/image/cimg/postgres
+      - image: cimg/postgres:14.0
+        environment:
+          POSTGRES_USER: circleci-demo-go
+          POSTGRES_DB: circle_test
+
+    environment:
+      TEST_RESULTS: /tmp/test-results
+
+    steps:
+      - checkout
+      - run: mkdir -p $TEST_RESULTS
+
+      - restore_cache:
+          keys:
+            - go-mod-v1-{{ checksum "go.sum" }}
+
+      - run:
+          name: Get dependencies
+          command: |
+            go get -v
+
+      - run:
+          name: Get go-junit-report for setting up test timings on CircleCI
+          command: |
+            go get github.com/jstemmer/go-junit-report
+            # Remove go-junit-report from go.mod
+            go mod tidy
+
+      #  Wait for Postgres to be ready before proceeding
+      - run:
+          name: Waiting for Postgres to be ready
+          command: dockerize -wait tcp://localhost:5432 -timeout 1m
+
+      - run:
+          name: Run unit tests
+          environment: # environment variables for the database url and path to migration files
+            CONTACTS_DB_URL: "postgres://circleci-demo-go@localhost:5432/circle_test?sslmode=disable"
+            CONTACTS_DB_MIGRATIONS: /home/circleci/project/db/migrations
+          command: |
+            trap "go-junit-report <${TEST_RESULTS}/go-test.out > ${TEST_RESULTS}/go-test-report.xml" EXIT
+            make test | tee ${TEST_RESULTS}/go-test.out
+      - run: make
+
+      - save_cache:
+          key: go-mod-v1-{{ checksum "go.sum" }}
+          paths:
+            - "/go/pkg/mod"
+
+      - run:
+          name: Start service
+          environment:
+            CONTACTS_DB_URL: "postgres://circleci-demo-go@localhost:5432/circle_test?sslmode=disable"
+            CONTACTS_DB_MIGRATIONS: /home/circleci/project/db/migrations
+          command: ./workdir/contacts
+          background: true
+
+      - run:
+          name: Validate service is working
+          command: |
+            sleep 5
+            curl --retry 10 --retry-delay 1 -X POST --header "Content-Type: application/json" -d '{"email":"test@example.com","name":"Test User"}' http://localhost:8080/contacts
+      - store_artifacts:
+          path: /tmp/test-results
+          destination: raw-test-output
+
+      - store_test_results:
+          path: /tmp/test-results
